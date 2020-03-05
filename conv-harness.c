@@ -20,10 +20,10 @@
 
    Version 1.3 : Fixed which loop variables were being incremented
                  in write_out();
-                 Fixed dimensions of output and control_output 
+                 Fixed dimensions of output and control_output
                  matrices in main function
 
-   Version 1.2 : Changed distribution of test data to (hopefully) 
+   Version 1.2 : Changed distribution of test data to (hopefully)
                  eliminate random walk of floating point error;
                  Also introduced checks to restrict kernel-order to
                  a small set of values
@@ -38,7 +38,8 @@
 #include <omp.h>
 #include <math.h>
 #include <stdint.h>
-
+#include <x86intrin.h>
+#include <iostream>
 /* the following two definitions of DEBUGGING control whether or not
    debugging information is written out. To put the program into
    debugging mode, uncomment the following line: */
@@ -55,7 +56,7 @@ struct sparse_matrix {
   int * channel_numbers;
 };
 
-// return a new sparse matrix with the provided dimensions 
+// return a new sparse matrix with the provided dimensions
 struct sparse_matrix * sparse_matrix_new(int nkernels, int nchannels, int nvalues)
 {
   struct sparse_matrix * result;
@@ -74,7 +75,7 @@ struct sparse_matrix * sparse_matrix_dense2sparse(float ** matrix, int nkernels,
   int non_zeros = 0;
   struct sparse_matrix * result;
   int nvalues;
-  
+
   // find the number of non-zero values in the dense matrix
   for ( i = 0; i < nkernels; i++ ) {
     for ( j = 0; j < nchannels; j++ ) {
@@ -86,7 +87,7 @@ struct sparse_matrix * sparse_matrix_dense2sparse(float ** matrix, int nkernels,
 
   // create the new unpopulated sparse matrix
   result = sparse_matrix_new(nkernels, nchannels, non_zeros);
-  
+
   // now copy the values from the dense matrix to the sparse matrix
   nvalues = 0;
   for ( i = 0; i < nkernels; i++ ) {
@@ -114,7 +115,7 @@ struct sparse_matrix *** kernels_dense2sparse(float **** kernels, int kernel_ord
 
   result = malloc(sizeof(struct sparse_matrix**) * kernel_order);
   temp = malloc(sizeof(struct sparse_matrix*) * kernel_order * kernel_order);
-  
+
   for ( i = 0; i < kernel_order; i++ ) {
     result[i] = &(temp[i * kernel_order]);
     for ( j = 0; j < kernel_order; j++ ) {
@@ -152,7 +153,7 @@ float **** new_empty_4d_matrix(int dim0, int dim1, int dim2, int dim3)
   float * mat3 = malloc(dim0 * dim1 * dim2 *dim3 * sizeof(float));
   int i, j, k;
 
-  
+
   for ( i = 0; i < dim0; i++ ) {
     result[i] = &(mat1[i*dim1]);
     for ( j = 0; j < dim1; j++ ) {
@@ -206,15 +207,16 @@ float **** gen_random_4d_matrix(int dim0, int dim1, int dim2, int dim3, int nz_r
   int i, j, k, l;
   struct timeval seedtime;
   int seed;
+  int theRand;
 
   assert( nz_ratio >= 1 );
-  
+
   result = new_empty_4d_matrix(dim0, dim1, dim2, dim3);
 
   /* use the microsecond part of the current time as a pseudorandom seed */
   gettimeofday(&seedtime, NULL);
   seed = seedtime.tv_usec;
-  srandom(seed);
+  srand(seed);
 
   /* fill the matrix with random numbers */
   const int range = 1 << 10; // 2^10
@@ -225,7 +227,8 @@ float **** gen_random_4d_matrix(int dim0, int dim1, int dim2, int dim3, int nz_r
       for ( k = 0; k < dim2; k++ ) {
         for ( l = 0; l < dim3; l++ ) {
 	  // generated a random number to decide if the value should be zero
-	  long long rand = random();
+	  theRand = rand();
+	  long long rand = (long)theRand;
 	  // nz ratio is the reciprocal of the proportion of values that
 	  // are non-zero; a nz ratio of 1 means all values are non-zero.
 	  // a nz ratio of 3 means that one in three values is non-zero
@@ -237,7 +240,7 @@ float **** gen_random_4d_matrix(int dim0, int dim1, int dim2, int dim3, int nz_r
 	    // but make sure that cutting down the range does not give us
 	    // a zero value; this loop might never terminate, but probably will
 	    while ( reduced_range == 0 ) {
-	      reduced_range = random() % range;
+	      reduced_range = theRand % range;
 	    }
 	    result[i][j][k][l] = reduced_range;
 	  }
@@ -278,7 +281,7 @@ void check_result(float *** result, float *** control,
   const double EPSILON = 0.0625;
 
   //printf("SAD\n");
-  
+
   for ( i = 0; i < dim0; i++ ) {
     for ( j = 0; j < dim1; j++ ) {
       for ( k = 0; k < dim2; k++ ) {
@@ -329,9 +332,34 @@ void team_conv_dense(float *** image, float **** kernels,
                int kernel_order) {
   // this call here is just dummy code
   // insert your own code instead
+
+
+  //
+  int h, w, x, y, c, m;
+  int n = 12;
+  omp_set_num_threads(4);
+#pragma omp parallel
+	{
+#pragma omp for schedule(static, 3)
+  for ( m = 0; m < nkernels; m++ ) {
+    for ( w = 0; w < width; w++ ) {
+      for ( h = 0; h < height; h++ ) {
+        double sum = 0.0;
+        for ( c = 0; c < nchannels; c++ ) {
+          for ( x = 0; x < kernel_order; x++) {
+            for ( y = 0; y < kernel_order; y++ ) {
+              sum += (double) image[w+x][h+y][c] * (double) kernels[x][y][m][c];
+            }
+          }
+          output[m][w][h] = (float) sum;
+        }
+      }
+    }
+  }
   multichannel_conv_dense(image, kernels, output, width,
                     height, nchannels, nkernels, kernel_order);
 }
+               }
 
 /* a slow but correct version of sparse convolution written by David */
 void multichannel_conv_sparse(float *** image, struct sparse_matrix *** kernels,
@@ -373,6 +401,9 @@ void multichannel_conv_sparse(float *** image, struct sparse_matrix *** kernels,
 void team_conv_sparse(float *** image, struct sparse_matrix *** kernels,
 		       float *** output, int width, int height,
 		       int nchannels, int nkernels, int kernel_order) {
+
+
+
   multichannel_conv_sparse(image, kernels, output, width, height,
 			   nchannels, nkernels, kernel_order);
 }
@@ -381,7 +412,7 @@ int main(int argc, char ** argv) {
   //float image[W][H][C];
   //float kernels[M][C][K][K];
   //float output[M][W][H];
-  
+
   float *** image;
   float **** kernels;
   struct sparse_matrix *** sparse_kernels = NULL;
@@ -452,8 +483,8 @@ int main(int argc, char ** argv) {
   }
   /* record finishing time */
   gettimeofday(&stop_time, NULL);
-  
-  
+
+
   mul_time = (stop_time.tv_sec - start_time.tv_sec) * 1000000L +
     (stop_time.tv_usec - start_time.tv_usec);
   printf("Team conv time: %lld microseconds\n", mul_time);
