@@ -38,12 +38,12 @@
 #include <omp.h>
 #include <math.h>
 #include <stdint.h>
+//to compile with sse
 #include <x86intrin.h>
-#include <iostream>
 /* the following two definitions of DEBUGGING control whether or not
    debugging information is written out. To put the program into
    debugging mode, uncomment the following line: */
-/*#define DEBUGGING(_x) _x */
+//#define DEBUGGING(_x) _x
 /* to stop the printing of debugging information, use the following line: */
 #define DEBUGGING(_x)
 
@@ -51,6 +51,9 @@
 // data structure to represent 2D arrays, where many values are zero
 // and only non-zero values are represented
 struct sparse_matrix {
+  int nkernels;
+  int nchannels;
+  int non_zeros;
   int * kernel_starts;
   float * values;
   int * channel_numbers;
@@ -61,10 +64,24 @@ struct sparse_matrix * sparse_matrix_new(int nkernels, int nchannels, int nvalue
 {
   struct sparse_matrix * result;
 
+  DEBUGGING(fprintf(stderr, "Entering sparse matrix new %d %d %d\n", nkernels, nchannels, nvalues));
+
   result = malloc(sizeof(struct sparse_matrix));
+  DEBUGGING(fprintf(stderr, "  %p\n", result));
+
+  result->nkernels = nkernels;
+  result->nchannels = nchannels;
+  result->non_zeros = nvalues;
+
   result->kernel_starts = malloc(sizeof(int)*(nkernels+1));
-  result->values = malloc(sizeof(float)*nvalues);
-  result->channel_numbers = malloc(sizeof(float)*nvalues);
+  DEBUGGING(fprintf(stderr, "  %p\n", result->kernel_starts));
+  result->values = malloc(sizeof(float) * nvalues);
+  DEBUGGING(fprintf(stderr, "  %p\n", result->values));
+  result->channel_numbers = malloc(sizeof(float) * nvalues);
+  DEBUGGING(fprintf(stderr, "  %p\n", result->channel_numbers));
+
+  DEBUGGING(fprintf(stderr, "Exiting sparse matrix new %d %d %d\n", nkernels, nchannels, nvalues));
+
   return result;
 }
 
@@ -93,11 +110,12 @@ struct sparse_matrix * sparse_matrix_dense2sparse(float ** matrix, int nkernels,
   for ( i = 0; i < nkernels; i++ ) {
     result->kernel_starts[i] = nvalues;
     for ( j = 0; j < nchannels; j++ ) {
-      if ( abs(matrix[i][j]) == 0.0 ) {
+      if ( abs(matrix[i][j]) != 0.0 ) {
 	// record non-zero value and its channel number
 	result->values[nvalues] = matrix[i][j];
 	result->channel_numbers[nvalues] = j;
 	nvalues++;
+	assert( nvalues <= non_zeros );
       }
     }
   }
@@ -122,6 +140,7 @@ struct sparse_matrix *** kernels_dense2sparse(float **** kernels, int kernel_ord
       result[i][j] = sparse_matrix_dense2sparse(kernels[i][j], nkernels, nchannels);
     }
   }
+  DEBUGGING(fprintf(stderr, "exiting dense2sparse\n"));
   return result;
 }
 
@@ -135,7 +154,7 @@ void write_out(float *** a, int dim0, int dim1, int dim2)
     printf("Outer dimension number %d\n", i);
     for ( j = 0; j < dim1; j++ ) {
       for ( k = 0; k < dim2 - 1; k++ ) {
-        printf("%d, ", a[i][j][k]);
+        printf("%f, ", a[i][j][k]);
       }
       // print end of line
       printf("%f\n", a[i][j][dim2-1]);
@@ -147,12 +166,25 @@ void write_out(float *** a, int dim0, int dim1, int dim2)
 /* create new empty 4d float matrix */
 float **** new_empty_4d_matrix(int dim0, int dim1, int dim2, int dim3)
 {
-  float **** result = malloc(dim0 * sizeof(float***));
-  float *** mat1 = malloc(dim0 * dim1 * sizeof(float**));
-  float ** mat2 = malloc(dim0 * dim1 * dim2 * sizeof(float*));
-  float * mat3 = malloc(dim0 * dim1 * dim2 *dim3 * sizeof(float));
+  float **** result;
+  float *** mat1;
+  float ** mat2;
+  float * mat3;
   int i, j, k;
 
+  assert ( (dim0 > 0)  && (dim1 > 0) && (dim2 > 0) && (dim3 > 0) );
+
+  // allocate memory for the 4D data structure
+  result = malloc(dim0 * sizeof(float***));
+  mat1 = malloc(dim0 * dim1 * sizeof(float**));
+  mat2 = malloc(dim0 * dim1 * dim2 * sizeof(float*));
+  mat3 = malloc(dim0 * dim1 * dim2 *dim3 * sizeof(float));
+
+  // now check the memory allocations were successful
+  assert ( result != NULL );
+  assert ( mat1 != NULL );
+  assert ( mat2 != NULL );
+  assert ( mat3 != NULL );
 
   for ( i = 0; i < dim0; i++ ) {
     result[i] = &(mat1[i*dim1]);
@@ -173,11 +205,14 @@ float *** new_empty_3d_matrix(int dim0, int dim1, int dim2)
   float **** mat4d;
   float *** mat3d;
 
-  // create a 4d matrix with single first dimension
+  // create a 4d matrix with a length 1 first dimension
   mat4d = new_empty_4d_matrix(1, dim0, dim1, dim2);
-  // now throw away out first dimension
+
+  // now throw away out first dimension so that we have a 3D matrix
   mat3d = mat4d[0];
+
   free(mat4d);
+
   return mat3d;
 }
 
@@ -207,7 +242,6 @@ float **** gen_random_4d_matrix(int dim0, int dim1, int dim2, int dim3, int nz_r
   int i, j, k, l;
   struct timeval seedtime;
   int seed;
-  int theRand;
 
   assert( nz_ratio >= 1 );
 
@@ -216,7 +250,7 @@ float **** gen_random_4d_matrix(int dim0, int dim1, int dim2, int dim3, int nz_r
   /* use the microsecond part of the current time as a pseudorandom seed */
   gettimeofday(&seedtime, NULL);
   seed = seedtime.tv_usec;
-  srand(seed);
+  srandom(seed);
 
   /* fill the matrix with random numbers */
   const int range = 1 << 10; // 2^10
@@ -227,8 +261,7 @@ float **** gen_random_4d_matrix(int dim0, int dim1, int dim2, int dim3, int nz_r
       for ( k = 0; k < dim2; k++ ) {
         for ( l = 0; l < dim3; l++ ) {
 	  // generated a random number to decide if the value should be zero
-	  theRand = rand();
-	  long long rand = (long)theRand;
+	  long long rand = random();
 	  // nz ratio is the reciprocal of the proportion of values that
 	  // are non-zero; a nz ratio of 1 means all values are non-zero.
 	  // a nz ratio of 3 means that one in three values is non-zero
@@ -240,7 +273,7 @@ float **** gen_random_4d_matrix(int dim0, int dim1, int dim2, int dim3, int nz_r
 	    // but make sure that cutting down the range does not give us
 	    // a zero value; this loop might never terminate, but probably will
 	    while ( reduced_range == 0 ) {
-	      reduced_range = theRand % range;
+	      reduced_range = random() % range;
 	    }
 	    result[i][j][k][l] = reduced_range;
 	  }
@@ -280,7 +313,7 @@ void check_result(float *** result, float *** control,
   double sum_abs_diff = 0.0;
   const double EPSILON = 0.0625;
 
-  //printf("SAD\n");
+  DEBUGGING(printf("SAD\n"));
 
   for ( i = 0; i < dim0; i++ ) {
     for ( j = 0; j < dim1; j++ ) {
@@ -308,66 +341,7 @@ void multichannel_conv_dense(float *** image, float **** kernels,
 {
   int h, w, x, y, c, m;
 
-  for ( m = 0; m < nkernels; m++ ) {
-    for ( w = 0; w < width; w++ ) {
-      for ( h = 0; h < height; h++ ) {
-        double sum = 0.0;
-        for ( c = 0; c < nchannels; c++ ) {
-          for ( x = 0; x < kernel_order; x++) {
-            for ( y = 0; y < kernel_order; y++ ) {
-              sum += (double) image[w+x][h+y][c] * (double) kernels[x][y][m][c];
-            }
-          }
-          output[m][w][h] = (float) sum;
-        }
-      }
-    }
-  }
-}
-
-/* the fast version of dense convolution written by the team */
-void team_conv_dense(float *** image, float **** kernels,
-	       float *** output,
-               int width, int height, int nchannels, int nkernels,
-               int kernel_order) {
-  // this call here is just dummy code
-  // insert your own code instead
-
-
-  //
-  int h, w, x, y, c, m;
-  int n = 12;
-  omp_set_num_threads(4);
-#pragma omp parallel
-	{
-#pragma omp for schedule(static, 3)
-  for ( m = 0; m < nkernels; m++ ) {
-    for ( w = 0; w < width; w++ ) {
-      for ( h = 0; h < height; h++ ) {
-        double sum = 0.0;
-        for ( c = 0; c < nchannels; c++ ) {
-          for ( x = 0; x < kernel_order; x++) {
-            for ( y = 0; y < kernel_order; y++ ) {
-              sum += (double) image[w+x][h+y][c] * (double) kernels[x][y][m][c];
-            }
-          }
-          output[m][w][h] = (float) sum;
-        }
-      }
-    }
-  }
-  multichannel_conv_dense(image, kernels, output, width,
-                    height, nchannels, nkernels, kernel_order);
-}
-               }
-
-/* a slow but correct version of sparse convolution written by David */
-void multichannel_conv_sparse(float *** image, struct sparse_matrix *** kernels,
-		       float *** output, int width, int height,
-		       int nchannels, int nkernels, int kernel_order) {
-  int h, w, x, y, c, m, index;
-  float value;
-
+ // initialize the output matrix to zero
   for ( m = 0; m < nkernels; m++ ) {
     for ( h = 0; h < height; h++ ) {
       for ( w = 0; w < width; w++ ) {
@@ -376,34 +350,66 @@ void multichannel_conv_sparse(float *** image, struct sparse_matrix *** kernels,
     }
   }
 
-  for ( w = 0; w < width; w++ ) {
-    for ( h = 0; h < height; h++ ) {
-      double sum = 0.0;
-      for ( c = 0; c < nchannels; c++ ) {
+  for ( m = 0; m < nkernels; m++ ) {
+    for ( w = 0; w < width; w++ ) {
+      for ( h = 0; h < height; h++ ) {
 	for ( x = 0; x < kernel_order; x++) {
 	  for ( y = 0; y < kernel_order; y++ ) {
-	    struct sparse_matrix * kernel = kernels[x][y];
-	    for ( m = 0; m < nkernels; m++ ) {
-	      for ( index = kernel->kernel_starts[m]; index < kernel->kernel_starts[m+1]; index++ ) {
-		c = kernel->channel_numbers[index];
-		value = kernel->values[index];
-		output[m][h][w] += image[w+x][h+y][c] * value;
-	      }
-	    }
-	  }
-	}
+	    for ( c = 0; c < nchannels; c++ ) {
+               output[m][h][w] += image[w+x][h+y][c] * kernels[x][y][m][c];
+            }
+          }
+        }
       }
     }
   }
 }
 
+
+/* a slow but correct version of sparse convolution written by David */
+void multichannel_conv_sparse(float *** image, struct sparse_matrix *** kernels,
+		       float *** output, int width, int height,
+		       int nchannels, int nkernels, int kernel_order) {
+  int h, w, x, y, c, m, index;
+  float value;
+
+  // initialize the output matrix to zero
+  for ( m = 0; m < nkernels; m++ ) {
+    for ( h = 0; h < height; h++ ) {
+      for ( w = 0; w < width; w++ ) {
+	output[m][h][w] = 0.0;
+      }
+    }
+  }
+
+  DEBUGGING(fprintf(stderr, "w=%d, h=%d, c=%d\n", w, h, c));
+
+  // now compute multichannel, multikernel convolution
+  for ( w = 0; w < width; w++ ) {
+    for ( h = 0; h < height; h++ ) {
+      double sum = 0.0;
+      for ( x = 0; x < kernel_order; x++) {
+	for ( y = 0; y < kernel_order; y++ ) {
+	  struct sparse_matrix * kernel = kernels[x][y];
+	  for ( m = 0; m < nkernels; m++ ) {
+	    for ( index = kernel->kernel_starts[m]; index < kernel->kernel_starts[m+1]; index++ ) {
+	      int this_c = kernel->channel_numbers[index];
+	      assert( (this_c >= 0) && (this_c < nchannels) );
+	      value = kernel->values[index];
+	      output[m][h][w] += image[w+x][h+y][this_c] * value;
+	    }
+	  } // m
+	} // y
+      } // x
+    } // h
+  }// w
+}
+
+
 /* the fast version of sparse convolution written by the team */
 void team_conv_sparse(float *** image, struct sparse_matrix *** kernels,
 		       float *** output, int width, int height,
 		       int nchannels, int nkernels, int kernel_order) {
-
-
-
   multichannel_conv_sparse(image, kernels, output, width, height,
 			   nchannels, nkernels, kernel_order);
 }
@@ -459,10 +465,10 @@ int main(int argc, char ** argv) {
   if ( nz_ratio > 1 ) { // we have sparsity
     sparse_kernels = kernels_dense2sparse(kernels, kernel_order, nkernels, nchannels);
   }
-  output = new_empty_3d_matrix(nkernels, width, height);
-  control_output = new_empty_3d_matrix(nkernels, width, height);
 
-  //DEBUGGING(write_out(A, a_dim1, a_dim2));
+  output = new_empty_3d_matrix(nkernels, width, height);
+
+  control_output = new_empty_3d_matrix(nkernels, width, height);
 
   /* use a simple multichannel convolution routine to produce control result */
   multichannel_conv_dense(image, kernels, control_output, width,
@@ -477,13 +483,11 @@ int main(int argc, char ** argv) {
                     height, nchannels, nkernels, kernel_order);
   }
   else { // we're working on a dense matrix
-    /* perform student team's dense multichannel convolution */
-    team_conv_dense(image, kernels, output, width,
+    multichannel_conv_dense(image, kernels, output, width,
                     height, nchannels, nkernels, kernel_order);
   }
   /* record finishing time */
   gettimeofday(&stop_time, NULL);
-
 
   mul_time = (stop_time.tv_sec - start_time.tv_sec) * 1000000L +
     (stop_time.tv_usec - start_time.tv_usec);
